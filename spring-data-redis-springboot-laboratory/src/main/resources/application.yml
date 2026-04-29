@@ -1,0 +1,30 @@
+server:
+  port: ${LAB_SERVER_PORT:18080}
+
+spring:
+  application:
+    name: spring-data-redis-l7-10-lab
+  redis:
+    host: ${LAB_REDIS_HOST:127.0.0.1}
+    port: ${LAB_REDIS_PORT:6379}
+    database: ${LAB_REDIS_DATABASE:0}
+    password: ${LAB_REDIS_PASSWORD:}
+    timeout: 500ms
+    lettuce:
+      pool:
+        max-active: 16
+        max-idle: 8
+        min-idle: 2
+        max-wait: 100ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+lab:
+  l7-10:
+    token-ttl-seconds: 300
+    purchase-record-ttl-seconds: 3600
+    order-worker-delay-ms: 80

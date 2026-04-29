@@ -278,12 +278,15 @@ public class JedisConnectionFactory implements InitializingBean, DisposableBean,
 	 */
 	protected Jedis fetchJedisConnector() {
 		try {
-
+			// 【痛点所在】：如果你配置了连接池（通常都会配）
 			if (getUsePool() && pool != null) {
+				// 这行代码是去 Apache Commons Pool 2 物理连接池里，
+				// “抢/借”一个真实物理 TCP 连接（如果池子空了，当前线程就会阻塞在这里等）
 				return pool.getResource();
 			}
-
+			// 如果你头铁没配连接池，每次执行到这里
 			Jedis jedis = createJedis();
+			// 就会发起一次真实的 TCP 三次握手建连！
 			// force initialization (see Jedis issue #82)
 			jedis.connect();
 
@@ -504,24 +507,56 @@ public class JedisConnectionFactory implements InitializingBean, DisposableBean,
 	 * (non-Javadoc)
 	 * @see org.springframework.data.redis.connection.RedisConnectionFactory#getConnection()
 	 */
+
+	/**
+	 * 获取与 Redis 服务器通信的 Jedis 连接对象。
+	 * <hr>
+	 * <h3>1. 核心定位：“传统车行”的交付提车</h3>
+	 * <p>与 <code>LettuceConnectionFactory</code> 中只是套了一层内存包装壳不同，这里是老牌 Jedis 的世界。<br>
+	 * 它的核心任务是去底层真实地“借出”或“新建”一个重量级的物理 TCP 连接，并包装成 Spring 标准接口交出去。</p>
+	 *
+	 * <h3>🔥 架构师视角：通过源码看清 Jedis 与 Lettuce 的底层鸿沟</h3>
+	 * <blockquote>
+	 * 将 Lettuce 源码与这段 Jedis 源码放在一起对比，架构高下立判：
+	 * <ul>
+	 * <li><b>1. 物理资源的极度浪费 vs 极致复用：</b>
+	 * <br>- <b>Jedis：</b>当有 1000 个并发线程时，Jedis 会在此处的 <code>fetchJedisConnector()</code> 真实地向服务器索要 1000 个 TCP 物理连接！这不仅耗尽连接池，也极大地挤占了服务端的内存和端口资源。
+	 * <br>- <b>Lettuce：</b>同样 1000 个并发，Lettuce 仅仅是在 JVM 内存里 new 了 1000 个 Java 包装壳，底层大家都在通过 Netty 往<b>同一个物理 TCP 通道</b>里塞数据报文。</li>
+	 * * <li><b>2. 致命的线程阻塞隐患：</b>
+	 * <br>- <b>Jedis：</b>若连接池 <code>max-active = 50</code>，第 51 个并发请求到来时，会在此处被彻底阻塞卡死，只能苦等别人归还连接。
+	 * <br>- <b>Lettuce：</b>大家都在同一个物理通道发非阻塞命令，根本不存在“借空连接池”的概念（特殊事务/阻塞命令除外），并发 10000 也不会因连接不足而阻塞线程。</li>
+	 * </ul>
+	 * <b>总结：</b>正因为 Jedis 底层采用<b>“重量级独占物理连接”</b>模式，性能存在天花板。所以从 Spring Boot 2.0 开始，官方毫不犹豫地将默认驱动从 Jedis 换成了基于 Netty 的 Lettuce！
+	 * </blockquote>
+	 *
+	 * @return 包装适配好的 Spring 标准 RedisConnection
+	 */
 	public RedisConnection getConnection() {
-
+		// 【步骤 1：营业前的安全检查】
+		// 确保当前 Factory 已经完成了 afterPropertiesSet() 的初始化动作
 		assertInitialized();
-
+		// 【步骤 2：集群架构的特殊通道】
+		// 集群版与单机版的底层逻辑不同，必须分流处理
 		if (isRedisClusterAware()) {
 			return getClusterConnection();
 		}
 
+		// 【步骤 3：绝对核心差异 —— 获取真实物理连接】
+		// fetchJedisConnector() 会老老实实去连接池 (pool.getResource()) 拿一个，或者新建一个真实的 TCP 物理连接
 		Jedis jedis = fetchJedisConnector();
 		JedisClientConfig sentinelConfig = this.clientConfig;
 
+		// 【步骤 4：解析哨兵配置】
 		SentinelConfiguration sentinelConfiguration = getSentinelConfiguration();
 		if (sentinelConfiguration != null) {
 			sentinelConfig = createSentinelClientConfig(sentinelConfiguration);
 		}
 
+		// 【步骤 5：组装 Spring 标准包装类】
+		// 重点：传给 JedisConnection 的第一个参数，是一个被当前线程【独占】的 jedis 物理实例！
 		JedisConnection connection = (getUsePool() ? new JedisConnection(jedis, pool, this.clientConfig, sentinelConfig)
 				: new JedisConnection(jedis, null, this.clientConfig, sentinelConfig));
+		// 统一流水线标准，开启结果转换开关
 		connection.setConvertPipelineAndTxResults(convertPipelineAndTxResults);
 		return postProcessConnection(connection);
 	}

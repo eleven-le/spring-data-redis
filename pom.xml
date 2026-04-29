@@ -6,10 +6,15 @@
 	<groupId>org.springframework.data</groupId>
 	<artifactId>spring-data-redis</artifactId>
 	<version>2.7.18</version>
+	<packaging>pom</packaging>
 
 	<name>Spring Data Redis</name>
 	<description>Spring Data module for Redis</description>
 	<url>https://spring.io/projects/spring-data-redis</url>
+	<modules>
+		<module>spring-data-redis-laboratory</module>
+		<module>spring-data-redis-springboot-laboratory</module>
+	</modules>
 
 	<parent>
 		<groupId>org.springframework.data.build</groupId>
@@ -31,6 +36,7 @@
 		<netty>4.1.79.Final</netty>
 		<java-module-name>spring.data.redis</java-module-name>
 		<mockk>1.13.3</mockk>
+		<kotlin>1.7.22</kotlin>
 	</properties>
 
 	<scm>
