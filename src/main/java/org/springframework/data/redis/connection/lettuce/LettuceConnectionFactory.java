@@ -893,6 +893,22 @@ public class LettuceConnectionFactory
 	 * @param shareNativeConnection enable connection sharing.
 	 */
 	public void setShareNativeConnection(boolean shareNativeConnection) {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 配置开关 · 是否注入共享原生连接</h3>
+		 *
+		 * <p><b>调用方</b>：Spring Boot 配置绑定、自定义 {@code LettuceConnectionFactory}
+		 * Bean，或本章 {@code ForceDedicatedConnectionDemo} 手工设置。</p>
+		 *
+		 * <p><b>触发条件</b>：业务希望关闭 Lettuce 默认共享原生连接，让每个
+		 * {@code LettuceConnection} 的普通命令也通过 {@code LettuceConnectionProvider}
+		 * 获取连接。</p>
+		 *
+		 * <p><b>做出的决定</b>：只改变 Factory 后续创建连接时是否传入 shared connection。
+		 * 它不是“事务/订阅/阻塞命令开关”，也不代表 Redis 协议要求独占；它改变的是默认连接策略。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：如果误以为 {@code false} 等价于“只让特殊命令走专用连接”，
+		 * 会在商品详情、SKU 价格查询这类普通短命令上也制造大量连接获取/释放成本。
+		 * ===== END ===== */
 		this.shareNativeConnection = shareNativeConnection;
 	}
 
@@ -1197,6 +1213,21 @@ public class LettuceConnectionFactory
 	 */
 	@Nullable
 	protected StatefulRedisConnection<byte[], byte[]> getSharedConnection() {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 对照方法 · asyncSharedConn 的来源</h3>
+		 *
+		 * <p><b>调用方</b>：{@code getConnection()} 创建新的 {@code LettuceConnection}
+		 * wrapper 时调用，并把返回值作为构造参数传入。</p>
+		 *
+		 * <p><b>触发条件</b>：每次业务从 Factory 获取非 Cluster 的命令连接。</p>
+		 *
+		 * <p><b>做出的决定</b>：当 {@code shareNativeConnection=true} 且不是 Cluster 时，
+		 * 返回 JVM 内复用的 {@code SharedConnection}；否则返回 {@code null}。返回 {@code null}
+		 * 后，{@code LettuceConnection#getAsyncConnection()} 的普通命令也会退到 dedicated 路径。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：看不懂 {@code asyncSharedConn} 为什么有时为 null，
+		 * 就会把 {@code shareNativeConnection=false} 误判成“代码用了事务/阻塞命令”。
+		 * ===== END ===== */
 		return shareNativeConnection && !isClusterAware()
 				? (StatefulRedisConnection) getOrCreateSharedConnection().getConnection()
 				: null;

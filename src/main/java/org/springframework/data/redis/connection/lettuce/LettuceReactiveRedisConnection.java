@@ -393,6 +393,23 @@ class LettuceReactiveRedisConnection implements ReactiveRedisConnection {
 		 */
 		Mono<T> getConnection() {
 
+			/* ===== L3-05 讲解注释 BY 军火库 =====
+			 * <h3>🔥 Reactive 对照 · AsyncConnect 懒连接模型</h3>
+			 *
+			 * <p><b>调用方</b>：Reactive Redis 命令、Reactive Pub/Sub 命令需要 dedicated
+			 * connection publisher 时调用。</p>
+			 *
+			 * <p><b>触发条件</b>：响应式 API 第一次订阅连接 publisher。与 imperative
+			 * {@code asyncDedicatedConn} 字段不同，这里用 {@code Mono.cache()} 把异步连接获取过程缓存起来，
+			 * 并用 {@code state} 防止关闭过程中的竞态。</p>
+			 *
+			 * <p><b>做出的决定</b>：把连接请求从 {@code INITIAL} 推进到
+			 * {@code CONNECTION_REQUESTED}，随后通过 {@code connectionProvider.getConnectionAsync(...)}
+			 * 获取连接。</p>
+			 *
+			 * <p><b>跳过它会怎样</b>：响应式并发订阅可能重复发起连接请求，或者关闭过程中仍然发出新连接，
+			 * 造成连接泄漏和生命周期竞态。它是 L3-05 在 reactive 分支上的同构设计对照。
+			 * ===== END ===== */
 			State state = this.state.get();
 			if (isClosing(state)) {
 				return Mono.error(new IllegalStateException("Unable to connect. Connection is closed!"));

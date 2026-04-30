@@ -41,6 +41,7 @@ import org.springframework.lang.Nullable;
 class DefaultValueOperations<K, V> extends AbstractOperations<K, V> implements ValueOperations<K, V> {
 
 	DefaultValueOperations(RedisTemplate<K, V> template) {
+		// 持有外层 RedisTemplate，后续命令统一通过 template.execute(...) 管理连接生命周期。
 		super(template);
 	}
 
@@ -51,10 +52,12 @@ class DefaultValueOperations<K, V> extends AbstractOperations<K, V> implements V
 	@Override
 	public V get(Object key) {
 
+		// execute(...) 会回到 RedisTemplate 获取/释放连接；回调负责 key 序列化和 value 反序列化。
 		return execute(new ValueDeserializingRedisCallback(key) {
 
 			@Override
 			protected byte[] inRedis(byte[] rawKey, RedisConnection connection) {
+				// rawKey 已经由 ValueDeserializingRedisCallback 序列化，这里只发送底层 GET 命令。
 				return connection.get(rawKey);
 			}
 		});

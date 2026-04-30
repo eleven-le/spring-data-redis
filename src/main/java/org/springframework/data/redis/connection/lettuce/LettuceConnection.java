@@ -81,6 +81,36 @@ import org.springframework.util.ObjectUtils;
  * {@code RedisConnection} implementation on top of <a href="https://github.com/mp911de/lettuce">Lettuce</a> Redis
  * client.
  *
+ * <h3>L3-06 源码导读：LettuceConnection 是「Adapter」的标准教科书实现</h3>
+ *
+ * <p>这个类是 Spring Data Redis 把 Lettuce 客户端「翻译」成自己抽象 {@link RedisConnection}
+ * 的核心适配器。在调用链路里它处于<b>承上启下</b>的位置：</p>
+ * <ul>
+ *   <li><b>对上</b>：实现 {@link RedisConnection} 全套命令族（Strings/Hash/List/Key/ZSet/Stream...），
+ *       让 {@code RedisTemplate} 完全感知不到 Lettuce 的存在；</li>
+ *   <li><b>对下</b>：组合一个共享 {@code asyncSharedConn} + 一个 {@code LettuceConnectionProvider}，
+ *       通过 {@link #getAsyncConnection()} 在普通命令 / 事务 / Pipeline / 阻塞命令之间分流。</li>
+ * </ul>
+ *
+ * <h4>L3-06 调试时重点观察</h4>
+ * <ol>
+ *   <li>上层 {@code RedisTemplate.execute} 拿到的 wrapper 对象 = 这里 new 出来的实例；</li>
+ *   <li>每个 {@link #stringCommands()}/{@link #keyCommands()} 等子门面都返回新的 LettuceXxxCommands，
+ *       它们再回过头调本类的 {@link #invoke()} —— 这是 Facade + Adapter 的组合；</li>
+ *   <li>{@link #invoke()} → {@link LettuceInvoker} → Lettuce 原生 {@code RedisAsyncCommands}：
+ *       从 SDR 抽象到 Lettuce 真实 IO 只需要 3 跳；</li>
+ *   <li>异常路径：所有 {@code catch (Exception)} 都走 {@link #convertLettuceAccessException(Exception)}
+ *       → {@link LettuceExceptionConverter} → {@code DataAccessException}。</li>
+ * </ol>
+ *
+ * <h4>偷师要点</h4>
+ * <ul>
+ *   <li>Adapter 模式：上层接口不动，下层实现可换；</li>
+ *   <li>Facade 模式：把 Lettuce 一堆命令族（StringAsyncCommands、ListAsyncCommands…）
+ *       聚合成一个统一入口；</li>
+ *   <li>Strategy + 异常翻译：{@code EXCEPTION_TRANSLATION} 是静态字段，所有异常路径共享。</li>
+ * </ul>
+ *
  * @author Costin Leau
  * @author Jennifer Hickey
  * @author Christoph Strobl
@@ -417,6 +447,15 @@ public class LettuceConnection extends AbstractRedisConnection {
 	 * (non-Javadoc)
 	 * @see org.springframework.data.redis.connection.AbstractRedisConnection#close()
 	 */
+	/**
+	 * Close this Spring Data Redis connection wrapper.
+	 * <p>
+	 * <b>L3-05 调试提示：</b>这里关闭的是 {@code LettuceConnection} wrapper。对于普通共享连接，
+	 * close 不会关闭全局 {@code asyncSharedConn}；如果本 wrapper 曾经因为 pipeline、transaction
+	 * 或 blocking command 创建过 {@code asyncDedicatedConn}，后续 {@code reset()} 会调用
+	 * {@code connectionProvider.release(asyncDedicatedConn)} 归还或关闭专用连接。
+	 * </p>
+	 */
 	@Override
 	public void close() {
 
@@ -437,6 +476,25 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	private void reset() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · 专用连接释放入口</h3>
+		 *
+		 * <p><b>调用方</b>：{@link #close()}，通常由 {@code RedisTemplate.execute(...)} 的
+		 * {@code finally} 通过 {@code RedisConnectionUtils.releaseConnection(...)} 间接触发。
+		 * 手动拿 {@code RedisConnection} 时，业务代码必须自己 {@code close()}，否则这里不会执行。</p>
+		 *
+		 * <p><b>触发条件</b>：当前 {@code LettuceConnection} 生命周期结束，需要清理事务、Pipeline、
+		 * 阻塞命令或订阅过程中持有的连接状态。</p>
+		 *
+		 * <p><b>做出的决定</b>：如果 {@code asyncDedicatedConn != null}，先把自定义 DB 切回默认 DB，
+		 * 再交给 {@code connectionProvider.release(asyncDedicatedConn)}。底层如果是
+		 * {@code LettucePoolingConnectionProvider}，这里是归还连接池；如果不是池化 Provider，
+		 * 通常就是关闭或释放底层物理连接。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：事务、BLPOP、Pipeline 等路径借出的专用连接无法归还，
+		 * 生产表现是连接池 active 持续升高、borrow 等待变长、Redis {@code CLIENT LIST}
+		 * 连接数异常，最终误判成 Redis 慢或 max-active 太小。
+		 * ===== END ===== */
 		if (asyncDedicatedConn != null) {
 			try {
 				if (customizedDatabaseIndex()) {
@@ -502,6 +560,15 @@ public class LettuceConnection extends AbstractRedisConnection {
 	/*
 	 * (non-Javadoc)
 	 * @see org.springframework.data.redis.connection.RedisConnection#openPipeline()
+	 */
+	/**
+	 * Open pipeline mode for this wrapper.
+	 * <p>
+	 * <b>L3-05 调试提示：</b>当前版本 {@code openPipeline()} 不只是设置
+	 * {@code isPipelined=true}，还会通过 {@code getOrCreateDedicatedConnection()} 让 pipeline
+	 * 固定在专用连接上。第一次进入这里时，{@code asyncDedicatedConn} 往往从 {@code null}
+	 * 变成真实 {@code StatefulConnection}。
+	 * </p>
 	 */
 	@Override
 	public void openPipeline() {
@@ -645,6 +712,22 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	@Override
 	public void multi() {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · MULTI 事务入口</h3>
+		 *
+		 * <p><b>调用方</b>：业务通过 {@code RedisConnection.multi()}、
+		 * {@code RedisTemplate.execute(SessionCallback)} 或 Spring Data Redis 事务支持进入。</p>
+		 *
+		 * <p><b>触发条件</b>：优惠券领取、库存扣减等需要 Redis 事务队列时调用 {@code MULTI}。
+		 * {@code MULTI} 是连接级状态，后续命令必须留在同一条连接的事务队列里。</p>
+		 *
+		 * <p><b>做出的决定</b>：先把 {@code isMulti=true}，随后无论同步还是 Pipeline 场景，
+		 * 都使用 dedicated 命令接口发送 {@code MULTI}，从而让事务上下文绑定在
+		 * {@code asyncDedicatedConn} 上，而不是污染 {@code asyncSharedConn}。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：如果 MULTI 落到共享连接，其他商品详情页 GET、库存 INCR
+		 * 可能被误塞进当前事务队列；如果 MULTI/EXEC 中途换连接，WATCH 和事务队列语义会断裂。
+		 * ===== END ===== */
 		if (isQueueing()) {
 			return;
 		}
@@ -694,6 +777,21 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	@Override
 	public void watch(byte[]... keys) {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · WATCH 乐观锁入口</h3>
+		 *
+		 * <p><b>调用方</b>：库存扣减、限时优惠券领取等乐观锁流程，典型链路是
+		 * {@code WATCH -> GET -> MULTI -> DECR/SADD -> EXEC}。</p>
+		 *
+		 * <p><b>触发条件</b>：需要监控某些 key 是否被其他客户端修改，且监控状态必须保存在同一条
+		 * Redis 连接上下文里。</p>
+		 *
+		 * <p><b>做出的决定</b>：非事务排队状态下，直接通过 {@code getDedicatedRedisCommands()}
+		 * 获取专用连接并发送 WATCH。这样后续 MULTI/EXEC 可以继续复用同一条 dedicated 连接。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：WATCH 在连接 A 上执行，EXEC 却跑到连接 B 上，
+		 * 业务以为做了乐观锁，实际监控状态已经丢失，抢券库存就可能出现超卖或异常失败率。
+		 * ===== END ===== */
 		if (isQueueing()) {
 			throw new UnsupportedOperationException();
 		}
@@ -770,6 +868,23 @@ public class LettuceConnection extends AbstractRedisConnection {
 	 */
 	@Override
 	public void subscribe(MessageListener listener, byte[]... channels) {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · SUBSCRIBE 订阅入口</h3>
+		 *
+		 * <p><b>调用方</b>：业务直接调用 {@code RedisConnection.subscribe(...)}，
+		 * 或上层监听容器为了实时门店库存广播、配置变更通知等场景建立订阅。</p>
+		 *
+		 * <p><b>触发条件</b>：Redis {@code SUBSCRIBE} 会把连接切到 Pub/Sub 协议状态，
+		 * 服务端开始持续推送消息，这条连接不再适合普通请求-响应命令。</p>
+		 *
+		 * <p><b>做出的决定</b>：先拒绝事务/Pipeline 状态下订阅，再通过
+		 * {@code initSubscription(listener)} -> {@code switchToPubSub()} 获取
+		 * {@code StatefulRedisPubSubConnection}。注意：Pub/Sub 走自己的专用连接类型，
+		 * 不复用 {@code asyncDedicatedConn} 字段。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：如果订阅连接和普通 GET/SET/INCR 混用，
+		 * 连接协议语义已经变成推送模式，普通业务请求会出现无法执行、响应错位或连接长期悬挂。
+		 * ===== END ===== */
 
 		checkSubscription();
 
@@ -830,6 +945,23 @@ public class LettuceConnection extends AbstractRedisConnection {
 	@SuppressWarnings("unchecked")
 	protected StatefulRedisPubSubConnection<byte[], byte[]> switchToPubSub() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · Pub/Sub 专用连接切换点</h3>
+		 *
+		 * <p><b>调用方</b>：{@code initSubscription(listener)}，由 {@code subscribe()} 和
+		 * {@code pSubscribe()} 触发。</p>
+		 *
+		 * <p><b>触发条件</b>：应用需要进入 Redis Pub/Sub 订阅模式，例如实时门店库存广播、
+		 * 运营活动开关推送、缓存失效通知。</p>
+		 *
+		 * <p><b>做出的决定</b>：先 {@code reset()} 当前连接状态，再向
+		 * {@code connectionProvider} 申请 {@code StatefulRedisPubSubConnection}。
+		 * 这条连接交给 {@code LettuceSubscription} 管理生命周期，不写入
+		 * {@code asyncDedicatedConn} 字段。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：订阅会污染普通命令连接。Redis SUBSCRIBE 后连接进入推送协议状态，
+		 * 如果商品详情 GET、SKU 价格查询继续复用这条连接，轻则命令被拒绝，重则连接长期悬挂。
+		 * ===== END ===== */
 		checkSubscription();
 		reset();
 		return connectionProvider.getConnection(StatefulRedisPubSubConnection.class);
@@ -865,6 +997,17 @@ public class LettuceConnection extends AbstractRedisConnection {
 	/**
 	 * Obtain a {@link LettuceInvoker} to call Lettuce methods using the default {@link #getAsyncConnection() connection}.
 	 *
+	 * <h3>L3-06 适配视角</h3>
+	 * <p>这是 LettuceXxxCommands 子门面进入「真正调 Lettuce 原生 API」的标准入口。
+	 * 它做了三件事：</p>
+	 * <ol>
+	 *   <li>调用 {@link #getAsyncConnection()} 选一条合适的 native connection（shared 或 dedicated）；</li>
+	 *   <li>把这条连接交给 {@link LettuceInvoker} 包成「函数式调用器」；</li>
+	 *   <li>由 {@code doInvoke} 决定 future 走「立即 await」「pipeline 队列」还是「事务队列」。</li>
+	 * </ol>
+	 * <p>这是 Spring 风格的典型范式：把<b>命令的 What</b>（方法引用）和<b>How</b>（同步/Pipeline/事务）
+	 * 完全解耦。</p>
+	 *
 	 * @return the {@link LettuceInvoker}.
 	 * @since 2.5
 	 */
@@ -897,6 +1040,25 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	private LettuceInvoker doInvoke(RedisClusterAsyncCommands<byte[], byte[]> connection, boolean statusCommand) {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · 命令执行结果分发器</h3>
+		 *
+		 * <p><b>调用方</b>：大多数 Lettuce 命令适配类都会调用 {@code invoke()} 或
+		 * {@code invoke(connection)}，例如字符串命令、List 命令、事务/Pipeline 内的命令。</p>
+		 *
+		 * <p><b>触发条件</b>：每次需要把 Lettuce 的 {@code RedisFuture} 转成 Spring Data Redis
+		 * 的同步返回、Pipeline 结果或事务结果时触发。</p>
+		 *
+		 * <p><b>做出的决定</b>：本方法不直接创建 dedicated 连接；它信任传入的
+		 * {@code connection} 参数。这个参数要么来自 {@code getAsyncConnection()} 的共享/独占选择，
+		 * 要么由 BLPOP 等特殊命令显式传入 {@code getAsyncDedicatedConnection()}。
+		 * 随后它按 {@code isPipelined()}、{@code isQueueing()} 决定结果进入 Pipeline 列表、
+		 * 事务队列，还是立即 await 返回。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：命令结果生命周期会散落在各个命令实现里，事务结果、Pipeline
+		 * 结果和普通同步结果难以保持一致；更严重的是特殊命令即便拿到了 dedicated 连接，
+		 * 结果也可能被错误地立即 await 或错误地进入事务队列。
+		 * ===== END ===== */
 		if (isPipelined()) {
 
 			return new LettuceInvoker(connection, (future, converter, nullDefault) -> {
@@ -952,8 +1114,40 @@ public class LettuceConnection extends AbstractRedisConnection {
 		txResults.add(result);
 	}
 
+	/**
+	 * Obtain async commands for regular command execution.
+	 * <p>
+	 * <b>L3-05 调试提示：</b>这是 shared/dedicated 的核心分流点：
+	 * </p>
+	 * <ul>
+	 * <li>如果 {@link #isQueueing()} 或 {@link #isPipelined()} 为 {@code true}，走
+	 * {@link #getAsyncDedicatedConnection()}。</li>
+	 * <li>否则如果 {@code asyncSharedConn != null}，复用 shared native connection。</li>
+	 * <li>否则说明共享连接不可用，例如 {@code shareNativeConnection=false}，普通命令也退到
+	 * dedicated 路径。</li>
+	 * </ul>
+	 *
+	 * @return Lettuce async command interface backed by shared or dedicated connection.
+	 */
 	RedisClusterAsyncCommands<byte[], byte[]> getAsyncConnection() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · 普通异步命令的共享/独占分发口</h3>
+		 *
+		 * <p><b>调用方</b>：{@code invoke()}、{@code invokeStatus()} 以及大部分普通 Redis
+		 * 命令适配路径。</p>
+		 *
+		 * <p><b>触发条件</b>：每次没有显式指定连接的命令需要获取 Lettuce async commands 时触发，
+		 * 例如商品详情页 {@code GET}、SKU 批量查询 {@code MGET}、签到位图 {@code SETBIT}。</p>
+		 *
+		 * <p><b>做出的决定</b>：如果当前正在事务排队或 Pipeline，就强制返回 dedicated async
+		 * commands；否则优先复用 {@code asyncSharedConn}。当 {@code asyncSharedConn == null}
+		 * 时（例如 {@code shareNativeConnection=false}），普通命令也会退到
+		 * {@code getAsyncDedicatedConnection()}。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：普通短命令和事务/Pipeline 命令没有统一分流点，
+		 * 要么全部走共享导致上下文污染，要么全部走专用导致连接数暴涨、池竞争增加。
+		 * ===== END ===== */
 		if (isQueueing() || isPipelined()) {
 			return getAsyncDedicatedConnection();
 		}
@@ -1004,8 +1198,36 @@ public class LettuceConnection extends AbstractRedisConnection {
 				String.format("%s is not a supported connection type.", connection.getClass().getName()));
 	}
 
+	/**
+	 * Obtain async commands backed by the dedicated native connection.
+	 * <p>
+	 * <b>L3-05 调试提示：</b>本方法是事务、pipeline、blocking command 等路径进入
+	 * {@code asyncDedicatedConn} 的统一入口。它会先检查 wrapper 是否关闭，再调用
+	 * {@code getOrCreateDedicatedConnection()}。真正向 provider 借连接的动作发生在
+	 * {@code doGetAsyncDedicatedConnection()}。
+	 * </p>
+	 *
+	 * @return Lettuce async command interface backed by {@code asyncDedicatedConn}.
+	 */
 	protected RedisClusterAsyncCommands<byte[], byte[]> getAsyncDedicatedConnection() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · asyncDedicatedConn 懒加载入口</h3>
+		 *
+		 * <p><b>调用方</b>：事务/Pipeline 状态下的 {@code getAsyncConnection()}，
+		 * 以及 {@code LettuceListCommands#bLPop}、{@code LettuceZSetCommands#bZPopMin}、
+		 * {@code LettuceStreamCommands#xRead} 等阻塞命令路径。</p>
+		 *
+		 * <p><b>触发条件</b>：当前命令需要独占连接上下文，或者 Factory 没有注入共享连接
+		 * （{@code shareNativeConnection=false}），且调用方需要 async commands。</p>
+		 *
+		 * <p><b>做出的决定</b>：先校验连接未关闭，再调用 {@code getOrCreateDedicatedConnection()}
+		 * 拿到当前 wrapper 绑定的 {@code StatefulConnection}，最后按 Standalone/Cluster 类型取
+		 * {@code async()}。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：BLPOP、XREAD BLOCK、事务内命令会落到共享 Netty Channel，
+		 * 一旦某个命令长期等待或改变连接状态，就会拖累商品详情、库存查询等核心短命令。
+		 * ===== END ===== */
 		if (isClosed()) {
 			throw new RedisSystemException("Connection is closed", null);
 		}
@@ -1026,6 +1248,22 @@ public class LettuceConnection extends AbstractRedisConnection {
 	@SuppressWarnings("unchecked")
 	protected StatefulConnection<byte[], byte[]> doGetAsyncDedicatedConnection() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · 专用 StatefulConnection 实际获取点</h3>
+		 *
+		 * <p><b>调用方</b>：只由 {@code getOrCreateDedicatedConnection()} 在
+		 * {@code asyncDedicatedConn == null} 时调用。</p>
+		 *
+		 * <p><b>触发条件</b>：当前 {@code LettuceConnection} 第一次需要 dedicated 连接，
+		 * 例如第一次 WATCH、MULTI、BLPOP 或 {@code shareNativeConnection=false} 下第一次普通命令。</p>
+		 *
+		 * <p><b>做出的决定</b>：委托 {@code connectionProvider.getConnection(StatefulConnection.class)}
+		 * 获取连接。Provider 背后可以是简单新建连接，也可以是 {@code LettucePoolingConnectionProvider}
+		 * 从 Commons Pool 里 borrow。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：{@code LettuceConnection} 就必须自己知道“新建连接、池化连接、
+		 * Cluster 节点连接”的所有细节，连接策略会散落在业务适配层，无法替换和测试。
+		 * ===== END ===== */
 		StatefulConnection connection = connectionProvider.getConnection(StatefulConnection.class);
 
 		if (customizedDatabaseIndex()) {
@@ -1088,6 +1326,21 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	private StatefulConnection<byte[], byte[]> getOrCreateDedicatedConnection() {
 
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · asyncDedicatedConn 字段懒加载</h3>
+		 *
+		 * <p><b>调用方</b>：{@code getAsyncDedicatedConnection()}、{@code getDedicatedConnection()}、
+		 * Pipeline flush state，以及事务/阻塞命令相关路径。</p>
+		 *
+		 * <p><b>触发条件</b>：当前 wrapper 第一次需要专用连接时，字段还是 {@code null}；
+		 * 后续同一个 wrapper 生命周期内再次进入事务/阻塞/Pipeline，会复用这条连接。</p>
+		 *
+		 * <p><b>做出的决定</b>：把“需要时才创建”的 Lazy Initialization 收口在一个字段判断里，
+		 * 避免每次普通命令都提前占用 dedicated 资源。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：要么每个 {@code LettuceConnection} 创建时都多开一条连接，
+		 * 造成线上连接数膨胀；要么每个特殊命令都重新借还连接，破坏事务/WATCH 必须同连接的语义。
+		 * ===== END ===== */
 		if (asyncDedicatedConn == null) {
 			asyncDedicatedConn = doGetAsyncDedicatedConnection();
 		}
@@ -1102,6 +1355,21 @@ public class LettuceConnection extends AbstractRedisConnection {
 
 	@SuppressWarnings("unchecked")
 	private RedisAsyncCommands<byte[], byte[]> getAsyncDedicatedRedisCommands() {
+		/* ===== L3-05 讲解注释 BY 军火库 =====
+		 * <h3>🔥 关键方法 · dedicated async commands 适配口</h3>
+		 *
+		 * <p><b>调用方</b>：事务和 Pipeline 组合路径，例如 {@code multi()}、
+		 * {@code exec()}、{@code discard()}、{@code watch()} 在 Pipeline/queueing 状态下调用。</p>
+		 *
+		 * <p><b>触发条件</b>：需要把 dedicated 的 Cluster async commands 窄化为 Redis async commands，
+		 * 以调用 {@code multi()}、{@code exec()}、{@code watch()} 等事务命令。</p>
+		 *
+		 * <p><b>做出的决定</b>：复用 {@code getAsyncDedicatedConnection()} 的懒加载与类型判断，
+		 * 这里只做命令接口转换。</p>
+		 *
+		 * <p><b>跳过它会怎样</b>：事务命令需要在多个位置重复强转和懒加载逻辑，
+		 * 更容易把某个分支误接到 shared async commands。
+		 * ===== END ===== */
 		return (RedisAsyncCommands) getAsyncDedicatedConnection();
 	}
 
