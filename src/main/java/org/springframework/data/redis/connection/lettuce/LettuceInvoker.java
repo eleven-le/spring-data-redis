@@ -52,25 +52,6 @@ import org.springframework.util.Assert;
  * The actual translation from {@link RedisFuture} is delegated to {@link Synchronizer} which can either await
  * completion or record the future along {@link Converter} for further processing.
  *
- * <h3>L3-06 源码导读：从「方法引用」到「Redis Server」的最后一跳</h3>
- *
- * <p>LettuceInvoker 承担的角色，是把 Spring Data Redis 的<b>命令调用</b>从静态方法签名解放出来：
- * 它接收 Lettuce 原生 {@code RedisXxxAsyncCommands::xxx} 的<b>方法引用</b>，
- * 配合一个 {@code Synchronizer} 决定「同步 await / Pipeline 收集 / 事务排队」三选一。</p>
- *
- * <h4>调试时观察</h4>
- * <ul>
- *   <li>{@link #connection} 字段：就是 {@code LettuceConnection.getAsyncConnection()} 选出来的 native connection；</li>
- *   <li>{@link #synchronizer}：在 {@code LettuceConnection.doInvoke()} 里通过 lambda 注入，
- *       它在三种场景下行为完全不同；</li>
- *   <li>每个 {@code just(Function, args...)}：你可以理解成「命令的 What」，
- *       而 Synchronizer 是「命令执行的 How」。</li>
- * </ul>
- *
- * <h4>偷师要点</h4>
- * <p>这是函数式编程在框架代码里的优雅落地：把行为参数化，避免针对每个命令写「同步版 + Pipeline 版 + 事务版」三遍。
- * 在自己的项目中可以借鉴这个模式来统一收口任何「命令 + 多种执行语义」的场景，比如批量任务调度。</p>
- *
  * @author Mark Paluch
  * @author Christoph Strobl
  * @since 2.5

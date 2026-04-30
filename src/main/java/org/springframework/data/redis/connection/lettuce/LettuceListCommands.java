@@ -201,20 +201,6 @@ class LettuceListCommands implements RedisListCommands {
 	@Override
 	public byte[] bLMove(byte[] sourceKey, byte[] destinationKey, Direction from, Direction to, double timeout) {
 
-		/* ===== L3-05 讲解注释 BY 军火库 =====
-		 * <h3>🔥 阻塞命令 · BLMOVE 显式走 dedicated</h3>
-		 *
-		 * <p><b>调用方</b>：订单队列、延迟队列、任务转移队列等业务通过
-		 * {@code RedisListCommands#bLMove(...)} 进入。</p>
-		 *
-		 * <p><b>触发条件</b>：{@code BLMOVE} 可能阻塞等待源队列元素，连接占用时间远大于普通 GET/SET。</p>
-		 *
-		 * <p><b>做出的决定</b>：这里没有调用默认 {@code connection.invoke()}，而是显式传入
-		 * {@code connection.getAsyncDedicatedConnection()}，把阻塞等待放到专用连接上。</p>
-		 *
-		 * <p><b>跳过它会怎样</b>：一个空订单队列的长轮询会卡住共享连接，商品详情、库存查询、
-		 * 优惠券状态查询这些短命令在客户端侧排队超时，Redis Server CPU 可能仍然很低。
-		 * ===== END ===== */
 		Assert.notNull(sourceKey, "Source key must not be null!");
 		Assert.notNull(destinationKey, "Destination key must not be null!");
 		Assert.notNull(from, "From direction must not be null!");
@@ -305,22 +291,6 @@ class LettuceListCommands implements RedisListCommands {
 	@Override
 	public List<byte[]> bLPop(int timeout, byte[]... keys) {
 
-		/* ===== L3-05 讲解注释 BY 军火库 =====
-		 * <h3>🔥 阻塞命令 · BLPOP 显式走 dedicated</h3>
-		 *
-		 * <p><b>调用方</b>：订单队列消费、异步发券队列、库存广播补偿队列等基于 Redis List
-		 * 的长轮询消费逻辑。</p>
-		 *
-		 * <p><b>触发条件</b>：{@code BLPOP timeout key...} 在队列为空时会阻塞等待。
-		 * timeout 为 0 时可能无限期占住连接。</p>
-		 *
-		 * <p><b>做出的决定</b>：直接调用 {@code connection.invoke(connection.getAsyncDedicatedConnection())}，
-		 * 不允许 BLPOP 走 {@code asyncSharedConn}。这就是 L3-05 阻塞命令触发
-		 * {@code asyncDedicatedConn} 的最直观源码入口。</p>
-		 *
-		 * <p><b>跳过它会怎样</b>：共享 Netty Channel 的队头被 BLPOP 占住，后续短命令即使 Redis
-		 * 端可以立刻处理，也会在客户端连接通道上排队，线上表现为大面积 Redis 调用超时。
-		 * ===== END ===== */
 		Assert.notNull(keys, "Key must not be null!");
 		Assert.noNullElements(keys, "Keys must not contain null elements!");
 
@@ -335,19 +305,6 @@ class LettuceListCommands implements RedisListCommands {
 	@Override
 	public List<byte[]> bRPop(int timeout, byte[]... keys) {
 
-		/* ===== L3-05 讲解注释 BY 军火库 =====
-		 * <h3>🔥 阻塞命令 · BRPOP 显式走 dedicated</h3>
-		 *
-		 * <p><b>调用方</b>：和 BLPOP 类似，常见于订单队列、发券队列、榜单异步刷新队列。</p>
-		 *
-		 * <p><b>触发条件</b>：{@code BRPOP} 会在队列为空时阻塞等待尾部元素。</p>
-		 *
-		 * <p><b>做出的决定</b>：同样显式传入 {@code getAsyncDedicatedConnection()}，
-		 * 让阻塞语义与普通商品/库存短命令隔离。</p>
-		 *
-		 * <p><b>跳过它会怎样</b>：某个消费者线程的长等待会把共享连接变成长连接阻塞点，
-		 * 造成“Redis CPU 不高但调用全慢”的典型误诊现场。
-		 * ===== END ===== */
 		Assert.notNull(keys, "Key must not be null!");
 		Assert.noNullElements(keys, "Keys must not contain null elements!");
 

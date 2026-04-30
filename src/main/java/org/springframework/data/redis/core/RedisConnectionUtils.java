@@ -41,19 +41,6 @@ import org.springframework.util.Assert;
  * <p>
  * Used internally by Spring's {@link RedisTemplate}. Can also be used directly in application code.
  *
- * <h3>L3-06 源码导读：把 RedisConnection 当成「JDBC Connection」来管理</h3>
- *
- * <p>这个类和 {@code DataSourceUtils} 在思想上完全一致：业务代码<b>不应该</b>自己持有连接，
- * 而是通过这里的 {@link #getConnection} / {@link #releaseConnection} 拿到再交还。
- * 它在适配链路里的位置是：</p>
- * <ol>
- *   <li>{@code RedisTemplate.execute} 进入 {@link #getConnection(RedisConnectionFactory, boolean)}；</li>
- *   <li>这里看 {@link TransactionSynchronizationManager} 是否绑定过 holder，决定复用还是新建；</li>
- *   <li>新建时调 {@code factory.getConnection()} → {@code LettuceConnectionFactory.getConnection()}
- *       → 拿到 {@link org.springframework.data.redis.connection.lettuce.LettuceConnection} wrapper；</li>
- *   <li>finally 走 {@link #releaseConnection}：如果是事务绑定的连接不真关，否则 close。</li>
- * </ol>
- *
  * @author Costin Leau
  * @author Christoph Strobl
  * @author Thomas Darimont
@@ -113,13 +100,6 @@ public abstract class RedisConnectionUtils {
 	 * @param factory connection factory for creating the connection.
 	 * @param transactionSupport whether transaction support is enabled.
 	 * @return an active Redis connection with transaction management if requested.
-	 * <p>
-	 * <b>L3-05 调试提示：</b>普通 {@code RedisTemplate.execute(...)} 会先进入这里。
-	 * 本方法本身不决定 shared/dedicated，只负责把调用转给
-	 * {@link #doGetConnection(RedisConnectionFactory, boolean, boolean, boolean)}。
-	 * 是否复用 thread-bound wrapper，要在 {@code doGetConnection(...)} 里看
-	 * {@code TransactionSynchronizationManager.getResource(factory)}。
-	 * </p>
 	 */
 	public static RedisConnection getConnection(RedisConnectionFactory factory, boolean transactionSupport) {
 		return doGetConnection(factory, true, false, transactionSupport);
@@ -137,13 +117,6 @@ public abstract class RedisConnectionUtils {
 	 * @param bind binds the connection to the thread, in case one was created-
 	 * @param transactionSupport whether transaction support is enabled.
 	 * @return an active Redis connection.
-	 * <p>
-	 * <b>L3-05 调试提示：</b>这是理解 {@code SessionCallback} 的关键方法。
-	 * 如果当前线程已经通过 {@link TransactionSynchronizationManager} 绑定了
-	 * {@code RedisConnectionHolder}，这里会返回 holder 中同一个 {@code LettuceConnection}
-	 * wrapper。因为 {@code asyncDedicatedConn} 是 wrapper 内部字段，所以事务/pipeline 要保证
-	 * 后续命令命中同一个 wrapper，不能每次重新创建连接外壳。
-	 * </p>
 	 */
 	public static RedisConnection doGetConnection(RedisConnectionFactory factory, boolean allowCreate, boolean bind,
 			boolean transactionSupport) {
@@ -263,12 +236,6 @@ public abstract class RedisConnectionUtils {
 	 *
 	 * @param conn the Redis connection to close.
 	 * @param factory the Redis factory that the connection was created with.
-	 * <p>
-	 * <b>L3-05 调试提示：</b>普通模板调用的 finally 会进入这里。没有 thread-bound holder
-	 * 时，本方法最终调用 {@code LettuceConnection#close()}，再由 {@code reset()} 释放
-	 * {@code asyncDedicatedConn}。如果存在事务 holder，则可能推迟到事务完成后释放。
-	 * 高并发排查连接池 active 不降时，要确认这里是否被执行，以及 wrapper 是否真的 close。
-	 * </p>
 	 */
 	public static void releaseConnection(@Nullable RedisConnection conn, RedisConnectionFactory factory) {
 		if (conn == null) {

@@ -93,22 +93,6 @@ class LettucePoolingConnectionProvider implements LettuceConnectionProvider, Red
 	@Override
 	public <T extends StatefulConnection<?, ?>> T getConnection(Class<T> connectionType) {
 
-		/* ===== L3-05 讲解注释 BY 军火库 =====
-		 * <h3>🔥 池化策略 · dedicated 连接 borrow 点</h3>
-		 *
-		 * <p><b>调用方</b>：{@code LettuceConnection#doGetAsyncDedicatedConnection()}，
-		 * 以及 Pub/Sub、Sentinel、Cluster 节点级连接等需要 Provider 获取连接的路径。</p>
-		 *
-		 * <p><b>触发条件</b>：启用 Lettuce pooling client configuration 后，
-		 * 事务、BLPOP、XREAD BLOCK 等 dedicated 路径不再每次新建连接，而是从对应类型的
-		 * {@code GenericObjectPool} borrow。</p>
-		 *
-		 * <p><b>做出的决定</b>：按 {@code connectionType} 维护不同连接池，并把借出的连接记录到
-		 * {@code poolRef}，为后续 {@code release(connection)} 找到正确的归还池。</p>
-		 *
-		 * <p><b>跳过它会怎样</b>：专用连接没有资源边界，阻塞队列消费或长事务高峰会无限创建连接；
-		 * Redis Server 连接数和客户端 FD 会快速升高。</p>
-		 * ===== END ===== */
 		GenericObjectPool<StatefulConnection<?, ?>> pool = pools.computeIfAbsent(connectionType, poolType -> {
 			return ConnectionPoolSupport.createGenericObjectPool(() -> connectionProvider.getConnection(connectionType),
 					poolConfig, false);
@@ -176,21 +160,6 @@ class LettucePoolingConnectionProvider implements LettuceConnectionProvider, Red
 	@Override
 	public void release(StatefulConnection<?, ?> connection) {
 
-		/* ===== L3-05 讲解注释 BY 军火库 =====
-		 * <h3>🔥 池化策略 · dedicated 连接归还点</h3>
-		 *
-		 * <p><b>调用方</b>：{@code LettuceConnection#reset()} 释放 {@code asyncDedicatedConn}，
-		 * {@code LettuceSubscription#doClose()} 释放 Pub/Sub 连接，以及其他 Provider 管理路径。</p>
-		 *
-		 * <p><b>触发条件</b>：业务命令生命周期结束，连接 wrapper close，或订阅关闭。</p>
-		 *
-		 * <p><b>做出的决定</b>：根据 borrow 时记录的 {@code poolRef}/{@code asyncPoolRef}
-		 * 找到对应池；归还前调用 {@code discardIfNecessary(connection)}，防止处在 MULTI 状态的连接
-		 * 被直接放回池污染下一个借用者。</p>
-		 *
-		 * <p><b>跳过它会怎样</b>：一是连接泄漏导致池耗尽；二是事务状态未清理导致下一个业务拿到
-		 * “脏连接”，出现串包、命令入错事务队列、EXEC 返回异常等事故模式。
-		 * ===== END ===== */
 		GenericObjectPool<StatefulConnection<?, ?>> pool = poolRef.remove(connection);
 
 		if (pool == null) {

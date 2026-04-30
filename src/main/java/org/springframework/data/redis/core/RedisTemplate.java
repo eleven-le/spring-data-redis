@@ -105,8 +105,6 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 
 	private @Nullable ScriptExecutor<K> scriptExecutor;
 
-	/* Value 类型操作门面在 RedisTemplate 创建时就初始化好。
-	 * opsForValue() 只是返回这个可复用对象，本身不会获取连接或发送 Redis 命令。*/
 	private final ValueOperations<K, V> valueOps = new DefaultValueOperations<>(this);
 	private final ListOperations<K, V> listOps = new DefaultListOperations<>(this);
 	private final SetOperations<K, V> setOps = new DefaultSetOperations<>(this);
@@ -194,26 +192,6 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	}
 
 	/**
-	 * <b>L3-05 调试提示：</b>这是普通命令和 pipeline 命令共同经过的模板方法入口。
-	 * 普通 GET/SET 只会通过 {@link RedisConnectionUtils#getConnection(RedisConnectionFactory, boolean)}
-	 * 拿到 {@code LettuceConnection} wrapper；真正是否使用 {@code asyncSharedConn} 或创建
-	 * {@code asyncDedicatedConn}，要继续跟到 {@code LettuceConnection#getAsyncConnection()}。
-	 * 当 {@code pipeline=true} 时，本方法会调用 {@code connToUse.openPipeline()}，当前版本
-	 * {@code LettuceConnection#openPipeline()} 会进一步触发 dedicated connection 懒加载。
-	 * </p>
-	 *
-	 * <p><b>L3-06 适配视角：</b>这是 Template / Callback 模式的「门面」。它做了 4 件标准动作：
-	 * 拿连接 → 执行业务回调 → 关闭 pipeline → 释放连接。其中：</p>
-	 * <ul>
-	 *   <li>{@code RedisConnectionUtils.getConnection} 体现「资源管理」思想；</li>
-	 *   <li>{@code action.doInRedis(connToExpose)} 是 Callback 反向回调，业务在这里看到 RedisConnection，
-	 *       但运行时实例是 {@link org.springframework.data.redis.connection.lettuce.LettuceConnection}；</li>
-	 *   <li>{@code finally } 中的 {@code releaseConnection} 体现「确定性资源释放」；</li>
-	 *   <li>异常会沿着回调上抛，由 {@code LettuceConnection.convertLettuceAccessException} +
-	 *       {@code LettuceExceptionConverter} 翻译成 {@code DataAccessException}。</li>
-	 * </ul>
-	 *
-	 * <hr>
 	 * Executes the given action object within a connection that can be exposed or not. Additionally, the connection can
 	 * be pipelined. Note the results of the pipeline are discarded (making it suitable for write-only scenarios).
 	 *
@@ -380,20 +358,6 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	/*
 	 * (non-Javadoc)
 	 * @see org.springframework.data.redis.core.RedisOperations#executeWithStickyConnection(org.springframework.data.redis.core.RedisCallback)
-	 */
-	/**
-	 * Execute a callback with a sticky connection whose lifecycle is delegated to the returned resource.
-	 * <p>
-	 * <b>L3-05 调试提示：</b>{@code scan(...)} 会走这里。和普通 {@link #execute(RedisCallback)}
-	 * 不同，本方法不会在 finally 中释放连接，因为返回的 {@link Closeable}（典型是
-	 * {@link Cursor}）后续迭代还要继续使用同一个 {@code RedisConnection} wrapper。关闭 Cursor
-	 * 时才会触发底层 {@code LettuceConnection#close()}。因此 scan 的关键不是必然创建
-	 * {@code asyncDedicatedConn}，而是 sticky connection 的生命周期必须由调用方关闭。
-	 * </p>
-	 *
-	 * @param callback callback returning a closeable resource.
-	 * @param <T> closeable resource type.
-	 * @return the closeable resource returned by the callback.
 	 */
 	@Override
 	public <T extends Closeable> T executeWithStickyConnection(RedisCallback<T> callback) {
@@ -1389,7 +1353,6 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	 */
 	@Override
 	public ValueOperations<K, V> opsForValue() {
-		// 返回 Redis String/value 命令族的操作对象；真正访问 Redis 发生在 get/set/increment 等方法里。
 		return valueOps;
 	}
 

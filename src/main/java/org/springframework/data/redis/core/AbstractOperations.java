@@ -58,7 +58,6 @@ abstract class AbstractOperations<K, V> {
 		}
 
 		public final V doInRedis(RedisConnection connection) {
-			// 模板方法：先把 Java key 序列化为 Redis 二进制 key，再把返回的二进制 value 反序列化为 V。
 			byte[] result = inRedis(rawKey(key), connection);
 			return deserializeValue(result);
 		}
