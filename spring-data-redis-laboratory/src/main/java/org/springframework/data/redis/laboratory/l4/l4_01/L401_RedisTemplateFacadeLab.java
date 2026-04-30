@@ -1,4 +1,4 @@
-package org.springframework.data.redis.laboratory.l4_01;
+package org.springframework.data.redis.laboratory.l4.l4_01;
 
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.PropertyAccessor;

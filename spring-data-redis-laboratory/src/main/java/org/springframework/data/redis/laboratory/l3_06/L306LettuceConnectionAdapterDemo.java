@@ -55,9 +55,6 @@ public class L306LettuceConnectionAdapterDemo {
 
 			/*
 			 * 第 1 个断点：opsForValue().set —— 业务层视角。
-			 * 这行会依次穿过 DefaultValueOperations、RedisTemplate.execute、RedisConnectionUtils、
-			 * LettuceConnectionFactory、LettuceConnection、LettuceStringCommands、LettuceInvoker，
-			 * 最后才到 Lettuce 原生 RedisStringAsyncCommands#set。
 			 */
 			template.opsForValue().set(KEY_PREFIX + "user:1", "Tom");
 
