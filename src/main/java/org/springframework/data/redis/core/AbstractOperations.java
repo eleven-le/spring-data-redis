@@ -51,32 +51,41 @@ abstract class AbstractOperations<K, V> {
 
 	// utility methods for the template internal methods
 	abstract class ValueDeserializingRedisCallback implements RedisCallback<V> {
+		// 保留原始 key，等 RedisTemplate 拿到连接后再序列化成 byte[]。
 		private Object key;
 
 		public ValueDeserializingRedisCallback(Object key) {
+			// 这里不碰 Redis，也不做序列化；只把 key 带进回调。
 			this.key = key;
 		}
 
 		public final V doInRedis(RedisConnection connection) {
+			// 执行前先序列化 key，再把 rawKey 和连接交给具体命令实现。
 			byte[] result = inRedis(rawKey(key), connection);
+			// Redis 返回的是 byte[]；按 valueSerializer 还原成调用方看到的 V。
 			return deserializeValue(result);
 		}
 
+		// 子类只关心具体 Redis 命令；key 序列化、value 反序列化由外层统一处理。
 		@Nullable
 		protected abstract byte[] inRedis(byte[] rawKey, RedisConnection connection);
 	}
 
+	// 持有 RedisTemplate；连接获取、事务绑定、pipeline、异常释放都回到 template 处理。
 	final RedisTemplate<K, V> template;
 
 	AbstractOperations(RedisTemplate<K, V> template) {
+		// 每个 XXXOperations 都共享同一个 template 配置和连接工厂。
 		this.template = template;
 	}
 
 	RedisSerializer keySerializer() {
+		// 读取 template 的 key 序列化器；key 怎么落盘由 template 配置决定。
 		return template.getKeySerializer();
 	}
 
 	RedisSerializer valueSerializer() {
+		// 读取 template 的 value 序列化器；value 怎么落盘由 template 配置决定。
 		return template.getValueSerializer();
 	}
 
@@ -94,6 +103,8 @@ abstract class AbstractOperations<K, V> {
 
 	@Nullable
 	<T> T execute(RedisCallback<T> callback) {
+		// Operations 层不直接管理连接；统一委托给 RedisTemplate.execute(...)。
+		// true 表示把当前连接暴露给回调，回调里可以直接调用 RedisConnection 命令。
 		return template.execute(callback, true);
 	}
 
@@ -104,12 +115,15 @@ abstract class AbstractOperations<K, V> {
 	@SuppressWarnings("unchecked")
 	byte[] rawKey(Object key) {
 
+		// Redis key 不能为 null；这里提前失败，避免把错误推到驱动层。
 		Assert.notNull(key, "non null key required");
 
+		// 没配 keySerializer 且调用方已经给 byte[]，直接原样下发。
 		if (keySerializer() == null && key instanceof byte[]) {
 			return (byte[]) key;
 		}
 
+		// 常规路径：按 RedisTemplate 上配置的 keySerializer 转成 byte[]。
 		return keySerializer().serialize(key);
 	}
 
@@ -121,10 +135,12 @@ abstract class AbstractOperations<K, V> {
 	@SuppressWarnings("unchecked")
 	byte[] rawValue(Object value) {
 
+		// 没配 valueSerializer 且 value 已经是 byte[]，直接当 Redis 原始值写入。
 		if (valueSerializer() == null && value instanceof byte[]) {
 			return (byte[]) value;
 		}
 
+		// 常规路径：按 RedisTemplate 上配置的 valueSerializer 转成 byte[]。
 		return valueSerializer().serialize(value);
 	}
 
@@ -354,9 +370,11 @@ abstract class AbstractOperations<K, V> {
 
 	@SuppressWarnings("unchecked")
 	V deserializeValue(byte[] value) {
+		// 没配 valueSerializer 时，直接把 Redis 原始 byte[] 当作返回值。
 		if (valueSerializer() == null) {
 			return (V) value;
 		}
+		// 常规路径：按 RedisTemplate 上配置的 valueSerializer 反序列化成 V。
 		return (V) valueSerializer().deserialize(value);
 	}
 

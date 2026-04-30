@@ -301,12 +301,17 @@ class DefaultValueOperations<K, V> extends AbstractOperations<K, V> implements V
 	@Override
 	public void set(K key, V value) {
 
+		// 先处理 value：Java 对象必须先按 valueSerializer 编成 Redis 字节。
+		// key 暂不处理；它会在回调真正执行时统一序列化。
 		byte[] rawValue = rawValue(value);
+		// 把 SET 命令包成 RedisCallback，交给 RedisTemplate 统一拿连接、执行、释放。
 		execute(new ValueDeserializingRedisCallback(key) {
 
 			@Override
 			protected byte[] inRedis(byte[] rawKey, RedisConnection connection) {
+				// rawKey 已经是 Redis 可识别的字节 key；rawValue 是上面序列化后的字节 value。
 				connection.set(rawKey, rawValue);
+				// SET 在这个 API 中没有返回值；返回 null，外层反序列化后仍是 null。
 				return null;
 			}
 		});

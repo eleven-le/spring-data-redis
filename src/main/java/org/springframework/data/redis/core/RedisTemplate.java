@@ -105,6 +105,8 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 
 	private @Nullable ScriptExecutor<K> scriptExecutor;
 
+	// Redis String/value 命令门面：Template 创建时一次性初始化，后续 opsForValue() 直接复用。
+	// 具体命令仍由 DefaultValueOperations 通过 RedisTemplate.execute(...) 进入连接层执行。
 	private final ValueOperations<K, V> valueOps = new DefaultValueOperations<>(this);
 	private final ListOperations<K, V> listOps = new DefaultListOperations<>(this);
 	private final SetOperations<K, V> setOps = new DefaultSetOperations<>(this);
@@ -175,6 +177,7 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	@Override
 	@Nullable
 	public <T> T execute(RedisCallback<T> action) {
+		// 入口重载：是否暴露原生连接，使用 template 当前配置。
 		return execute(action, isExposeConnection());
 	}
 
@@ -188,6 +191,7 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	 */
 	@Nullable
 	public <T> T execute(RedisCallback<T> action, boolean exposeConnection) {
+		// 普通命令默认不开 pipeline；真正执行交给三参数重载。
 		return execute(action, exposeConnection, false);
 	}
 
@@ -204,32 +208,44 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	@Nullable
 	public <T> T execute(RedisCallback<T> action, boolean exposeConnection, boolean pipeline) {
 
+		// RedisTemplate 必须完成 afterPropertiesSet()，否则序列化器/执行器可能还没准备好。
 		Assert.isTrue(initialized, "template not initialized; call afterPropertiesSet() before using it");
+		// 回调就是实际 Redis 命令体，不能为空。
 		Assert.notNull(action, "Callback object must not be null");
 
+		// 取连接工厂；没有工厂就无法创建 RedisConnection。
 		RedisConnectionFactory factory = getRequiredConnectionFactory();
+		// 从工厂拿连接；开启事务支持时，会优先绑定到当前事务上下文。
 		RedisConnection conn = RedisConnectionUtils.getConnection(factory, enableTransactionSupport);
 
 		try {
 
+			// 判断当前线程是否已经绑定了这个 RedisConnectionFactory。
 			boolean existingConnection = TransactionSynchronizationManager.hasResource(factory);
+			// 给子类扩展连接包装/替换的机会；默认直接返回原连接。
 			RedisConnection connToUse = preProcessConnection(conn, existingConnection);
 
+			// 记录进入前是否已经处于 pipeline，避免重复开启或误关闭。
 			boolean pipelineStatus = connToUse.isPipelined();
+			// 调用方要求 pipeline 且当前还没开，才在这里打开。
 			if (pipeline && !pipelineStatus) {
 				connToUse.openPipeline();
 			}
 
+			// exposeConnection=true 时把真实连接给回调；否则给一个受保护的代理连接。
 			RedisConnection connToExpose = (exposeConnection ? connToUse : createRedisConnectionProxy(connToUse));
+			// 真正执行 Redis 命令；DefaultValueOperations#set 的 connection.set(...) 就在这里触发。
 			T result = action.doInRedis(connToExpose);
 
-			// close pipeline
+			// 只关闭本方法打开的 pipeline；调用前已存在的 pipeline 由外层负责。
 			if (pipeline && !pipelineStatus) {
 				connToUse.closePipeline();
 			}
 
+			// 给子类统一处理返回值的机会；默认原样返回。
 			return postProcessResult(result, connToUse, existingConnection);
 		} finally {
+			// 无论命令成功还是异常，都释放/解绑连接，避免连接泄漏。
 			RedisConnectionUtils.releaseConnection(conn, factory, enableTransactionSupport);
 		}
 	}
@@ -392,11 +408,13 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	 * @param connection redis connection
 	 */
 	protected RedisConnection preProcessConnection(RedisConnection connection, boolean existingConnection) {
+		// 默认不改连接；子类可在命令执行前包一层或替换连接。
 		return connection;
 	}
 
 	@Nullable
 	protected <T> T postProcessResult(@Nullable T result, RedisConnection conn, boolean existingConnection) {
+		// 默认不改结果；子类可在连接执行后统一转换返回值。
 		return result;
 	}
 
@@ -1353,6 +1371,8 @@ public class RedisTemplate<K, V> extends RedisAccessor implements RedisOperation
 	 */
 	@Override
 	public ValueOperations<K, V> opsForValue() {
+		// 这里只做门面分发：不取连接、不发 Redis 命令、不做序列化。
+		// set/get/increment 等真正动作发生在 valueOps 的具体方法里。
 		return valueOps;
 	}
 
